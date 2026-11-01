@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TH Management — Состояние тикетов
 // @namespace    th-management-ticket-state
-// @version      1.0
-// @description  Кнопка «Состояние тикетов» на странице списка платёжных запросов: по списку Ticket ID (или по тикетам на экране) спрашивает сайт и показывает текущее состояние каждого тикета — External Status, Transaction ID, Inside comment, Agent's files, User ID и субагента — со сводкой, таблицей для копирования и файлом Excel. Только читает: окна Edit не открываются, в тикетах ничего не меняется.
+// @version      1.1
+// @description  Кнопка «Состояние тикетов» на странице списка платёжных запросов: по списку Ticket ID (или по тикетам на экране) спрашивает сайт и показывает текущее состояние каждого тикета — External Status, Transaction ID, Inside comment, Agent's files, User ID, ГЕО, реферала, агента и субагента — со сводкой, таблицей для копирования и файлом Excel (общий лист и по листу на каждый External Status). Только читает: окна Edit не открываются, в тикетах ничего не меняется.
 // @match        https://th-managment.com/en/admin/backoffice/paymentsupport*
 // @match        https://managment.io/en/admin/backoffice/paymentsupport*
 // @match        https://my-managment.com/en/admin/backoffice/paymentsupport*
@@ -277,6 +277,64 @@
   const RETRYABLE_HTTP = [429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529];
 
   // Одна страница выдачи для набора Ticket ID. Возвращает:
+  // Колонки ГЕО, Реферал и Агент. Точное имя поля в ответе сайта у разных
+  // версий страницы может отличаться, поэтому сначала пробуем известные имена,
+  // потом — любое поле, в имени которого есть подходящее слово (name… раньше
+  // id…). undefined — подходящего поля в ответе нет вовсе: «нет данных».
+  const EXTRA_FIELDS = {
+    geo: {
+      keys: ['nameCountry', 'nameGeo', 'geo', 'country', 'countryName'],
+      pattern: /geo|country/i,
+    },
+    referral: {
+      keys: ['nameReferral', 'referral', 'nameReferal', 'referal', 'nameReferrer', 'referrer', 'referralName', 'nameRef', 'refName'],
+      pattern: /referr|referal|^(name|id)?ref(_?ids?|name)?$/i,
+      // Номер платежа (paymentReference и т. п.) — не реферал
+      exclude: /reference/i,
+    },
+    agent: {
+      keys: ['nameAgent', 'agent', 'agentName', 'nameAgentExternal'],
+      pattern: /agent/i,
+      // Субагент — своя колонка; documents… — Agent's files
+      exclude: /sub_?agent|document|file/i,
+    },
+  };
+
+  function fieldText(value) {
+    if (value == null) return '';
+    if (typeof value === 'object') {
+      if (Array.isArray(value)) return value.map(fieldText).filter(Boolean).join(', ');
+      return fieldText(value.name != null ? value.name : value.title != null ? value.title : '');
+    }
+    return String(value)
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function pickExtraField(r, spec) {
+    for (const k of spec.keys) {
+      if (k in r) return fieldText(r[k]);
+    }
+    const rank = (k) => (/^name/i.test(k) ? 0 : /^id/i.test(k) ? 2 : 1);
+    const key = Object.keys(r)
+      .filter((k) => spec.pattern.test(k) && !(spec.exclude && spec.exclude.test(k)))
+      .sort((a, b) => rank(a) - rank(b))[0];
+    return key === undefined ? undefined : fieldText(r[key]);
+  }
+
+  // Какие поля прислал сайт — один раз за запуск страницы, в консоль: если
+  // ГЕО, Реферал или Агент вышли «нет данных», по этому списку видно, как
+  // поле называется на самом деле.
+  let responseKeysLogged = false;
+  function logResponseKeys(sample) {
+    if (responseKeysLogged || !sample) return;
+    responseKeysLogged = true;
+    console.info('[TicketState] Поля в строке ответа сайта:', Object.keys(sample).join(', '));
+  }
+
   //   { kind: 'ok', rows, hasMore } — данные;
   //   { kind: 'expired', detail }   — вместо данных страница входа;
   //   { kind: 'retry', detail }     — сайт перегружен или ещё считает;
@@ -331,9 +389,9 @@
     if (!json || json.success === false || !Array.isArray(json.data)) {
       return { kind: 'error', detail: 'сайт ответил не в том виде, который знает скрипт' };
     }
-    const rows = json.data
-      .flat()
-      .filter((r) => r && typeof r === 'object')
+    const rawRows = json.data.flat().filter((r) => r && typeof r === 'object');
+    logResponseKeys(rawRows[0]);
+    const rows = rawRows
       .map((r) => ({
         ticketId: String(r.idTicket == null ? '' : r.idTicket).trim(),
         externalStatus: String(r.nameExternalStatus == null ? '' : r.nameExternalStatus).trim(),
@@ -343,6 +401,9 @@
         agentFiles: 'documentsExternal' in r ? (r.documentsExternal == null ? '' : String(r.documentsExternal)) : undefined,
         userId: r.idUser == null ? '' : String(r.idUser).trim(),
         subagent: String(r.nameSubagent == null ? '' : r.nameSubagent).trim(),
+        geo: pickExtraField(r, EXTRA_FIELDS.geo),
+        referral: pickExtraField(r, EXTRA_FIELDS.referral),
+        agent: pickExtraField(r, EXTRA_FIELDS.agent),
         // Inside comment
         insideComment: String(r.commentSupport == null ? '' : r.commentSupport).trim(),
       }))
@@ -958,16 +1019,21 @@
       if (f.state === 'missing') return 'нет данных';
       return `${f.count} ${pluralRu(f.count, 'файл', 'файла', 'файлов')}`;
     };
+    // ГЕО, Реферал, Агент: undefined — такого поля в ответе сайта нет
+    const extraNote = (v) => (v === undefined ? 'нет данных' : v);
     const header = [
       'Ticket ID', 'External Status', 'Transaction ID', 'Inside comment',
-      "Agent's files", 'User ID', 'Субагент',
+      "Agent's files", 'User ID', 'ГЕО', 'Реферал', 'Агент', 'Субагент',
     ];
+    const widths = [14, 28, 18, 40, 14, 14, 14, 24, 24, 32];
+    const NOT_FOUND = 'сайт не нашёл по фильтру';
     const tableRows = ids.map((id) => {
       const row = rows.get(id);
-      if (!row) return [id, 'сайт не нашёл по фильтру', '', '', '', '', ''];
+      if (!row) return [id, NOT_FOUND, ...header.slice(2).map(() => '')];
       return [
         id, row.externalStatus, row.transactionId, row.insideComment,
-        filesNote(row), row.userId, row.subagent,
+        filesNote(row), row.userId, extraNote(row.geo), extraNote(row.referral),
+        extraNote(row.agent), row.subagent,
       ];
     });
     window.__thTicketState = tableRows.map((r) =>
@@ -1017,13 +1083,22 @@
         kind: 'state',
         label: `Excel (${ids.length} ${pluralRu(ids.length, 'тикет', 'тикета', 'тикетов')})`,
         fileName: () => stampedFileName('sostoyanie-tiketov'),
+        // Первый лист — все тикеты в порядке списка. Дальше по листу на
+        // каждый External Status (от самого частого), в конце — тикеты,
+        // которых сайт не нашёл. Строки на листах — в том же порядке списка.
         build: () =>
-          buildSheetsXlsx([{
-            name: 'Тикеты',
-            header,
-            widths: [14, 28, 18, 40, 14, 14, 32],
-            rows: tableRows,
-          }]),
+          buildSheetsXlsx([
+            { name: 'Тикеты', header, widths, rows: tableRows },
+            ...byStatus.map(([name]) => ({
+              name: name === '(пусто)' ? 'Без статуса' : name,
+              header,
+              widths,
+              rows: tableRows.filter((r, i) => rows.has(ids[i]) && (r[1] || '(пусто)') === name),
+            })),
+            ...(notFound.length > 0
+              ? [{ name: 'Сайт не нашёл', header, widths, rows: tableRows.filter((_, i) => !rows.has(ids[i])) }]
+              : []),
+          ]),
       }],
     };
     showReportWindow(lines.join('\n'), blocks, options);
@@ -1227,8 +1302,8 @@
       title: 'Состояние тикетов',
       hint:
         'Скрипт только читает: спросит сайт о каждом тикете и покажет его текущее состояние — ' +
-        "External Status, Transaction ID, Inside comment, Agent's files, User ID и субагента — " +
-        'с файлом Excel. Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
+        "External Status, Transaction ID, Inside comment, Agent's files, User ID, ГЕО, реферала, " +
+        'агента и субагента — с файлом Excel. Окна Edit не открываются, в тикетах ничего не меняется. Вставь список ' +
         'Ticket ID — по одному в строке — или проверь тикеты, которые сейчас на экране.',
       logName: 'Состояние тикетов',
       onDone: showTicketStateReport,
