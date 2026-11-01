@@ -283,7 +283,7 @@
   // id…). undefined — подходящего поля в ответе нет вовсе: «нет данных».
   const EXTRA_FIELDS = {
     geo: {
-      keys: ['nameGeo', 'geo', 'nameCountry', 'country', 'nameGeoCountry', 'geoName', 'countryName'],
+      keys: ['nameCountry', 'nameGeo', 'geo', 'country', 'countryName'],
       pattern: /geo|country/i,
     },
     referral: {
