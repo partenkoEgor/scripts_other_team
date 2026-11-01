@@ -287,8 +287,10 @@
       pattern: /geo|country/i,
     },
     referral: {
-      keys: ['nameReferral', 'referral', 'nameReferal', 'referal', 'nameReferrer', 'referrer', 'referralName'],
-      pattern: /refer/i,
+      keys: ['nameReferral', 'referral', 'nameReferal', 'referal', 'nameReferrer', 'referrer', 'referralName', 'nameRef', 'refName'],
+      pattern: /referr|referal|^(name|id)?ref(_?ids?|name)?$/i,
+      // Номер платежа (paymentReference и т. п.) — не реферал
+      exclude: /reference/i,
     },
     agent: {
       keys: ['nameAgent', 'agent', 'agentName', 'nameAgentExternal'],
